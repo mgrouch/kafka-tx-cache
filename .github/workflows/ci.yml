@@ -19,7 +19,7 @@ jobs:
           cache: maven
 
       - name: Build
-        run: mvn -B -DskipTests package
+        run: mvn -B -DskipTests clean package
 
       - name: Start Kafka
         run: docker compose up -d kafka
@@ -30,6 +30,8 @@ jobs:
             docker compose exec -T kafka sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list" && exit 0
             sleep 5
           done
+          echo "Kafka did not become ready in time"
+          docker compose logs kafka
           exit 1
 
       - name: Create topics
@@ -39,7 +41,10 @@ jobs:
           docker compose exec -T kafka sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic processed-event --partitions 6 --replication-factor 1"
 
       - name: Start app
-        run: docker compose up -d app
+        run: docker compose up -d --build app
+
+      - name: Wait for app startup
+        run: sleep 15
 
       - name: Publish sample input
         run: |
@@ -47,16 +52,38 @@ jobs:
           {"eventId":"evt-1","eventTime":"2026-04-22T16:00:00Z","entity":{"productId":"p-100","entityId":"t-1","kind":"T","tValue":{"id":"t-1","name":"name-1","quantity":10},"sValue":null,"tsValue":null,"tombstone":false}}
           {"eventId":"evt-2","eventTime":"2026-04-22T16:00:01Z","entity":{"productId":"p-100","entityId":"s-1","kind":"S","tValue":null,"sValue":{"id":"s-1","status":"OPEN"},"tsValue":null,"tombstone":false}}
           EOF
-          docker cp sample.json $(docker compose ps -q kafka):/tmp/sample.json
-          docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic input-event --property parse.key=true --property key.separator='|' < <(awk '{print \"p-100|\" \$0}' /tmp/sample.json)"
+
+          docker cp sample.json "$(docker compose ps -q kafka)":/tmp/sample.json
+
+          docker compose exec -T kafka sh -lc '
+            awk '"'"'{print "p-100|" $0}'"'"' /tmp/sample.json \
+            | /opt/kafka/bin/kafka-console-producer.sh \
+                --bootstrap-server kafka:9092 \
+                --topic input-event \
+                --property parse.key=true \
+                --property key.separator="|"
+          '
 
       - name: Wait for processing
         run: sleep 20
 
       - name: Debug app logs
+        if: always()
         run: docker compose logs app
 
+      - name: Debug Kafka logs
+        if: always()
+        run: docker compose logs kafka
+
+      - name: Debug topic offsets
+        if: always()
+        run: |
+          docker compose exec -T kafka sh -lc '/opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic input-event || true'
+          docker compose exec -T kafka sh -lc '/opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic processed-event || true'
+          docker compose exec -T kafka sh -lc '/opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic cache-log-event || true'
+
       - name: Debug topic contents
+        if: always()
         run: |
           docker compose exec -T kafka sh -lc '
             echo "INPUT:"
@@ -84,25 +111,37 @@ jobs:
       - name: Assert processed output exists
         run: |
           docker compose exec -T kafka sh -lc '
+            mkdir -p /tmp
+            : > /tmp/out.txt
+
             /opt/kafka/bin/kafka-console-consumer.sh \
               --bootstrap-server kafka:9092 \
               --topic processed-event \
               --from-beginning \
               --timeout-ms 10000 \
               > /tmp/out.txt 2>/dev/null || true
-          
+
+            test -f /tmp/out.txt
             test "$(wc -l < /tmp/out.txt)" -ge 2
           '
 
       - name: Assert cache log exists
         run: |
           docker compose exec -T kafka sh -lc '
+            mkdir -p /tmp
+            : > /tmp/cache.txt
+
             /opt/kafka/bin/kafka-console-consumer.sh \
               --bootstrap-server kafka:9092 \
               --topic cache-log-event \
               --from-beginning \
               --timeout-ms 10000 \
               > /tmp/cache.txt 2>/dev/null || true
-          
+
+            test -f /tmp/cache.txt
             test "$(wc -l < /tmp/cache.txt)" -ge 3
           '
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

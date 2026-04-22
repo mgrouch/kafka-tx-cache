@@ -27,16 +27,16 @@ jobs:
       - name: Wait for Kafka
         run: |
           for i in {1..30}; do
-            docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list" && exit 0
+            docker compose exec -T kafka sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list" && exit 0
             sleep 5
           done
           exit 1
 
       - name: Create topics
         run: |
-          docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic input-event --partitions 6 --replication-factor 1"
-          docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic cache-log-event --partitions 6 --replication-factor 1"
-          docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic processed-event --partitions 6 --replication-factor 1"
+          docker compose exec -T kafka sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic input-event --partitions 6 --replication-factor 1"
+          docker compose exec -T kafka sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic cache-log-event --partitions 6 --replication-factor 1"
+          docker compose exec -T kafka sh -lc "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic processed-event --partitions 6 --replication-factor 1"
 
       - name: Start app
         run: docker compose up -d app
@@ -65,20 +65,21 @@ jobs:
               --topic input-event \
               --from-beginning \
               --timeout-ms 5000 2>/dev/null || true
-          
+
             echo "PROCESSED:"
             /opt/kafka/bin/kafka-console-consumer.sh \
               --bootstrap-server kafka:9092 \
               --topic processed-event \
               --from-beginning \
               --timeout-ms 5000 2>/dev/null || true
-          
+
             echo "CACHE:"
             /opt/kafka/bin/kafka-console-consumer.sh \
               --bootstrap-server kafka:9092 \
               --topic cache-log-event \
               --from-beginning \
               --timeout-ms 5000 2>/dev/null || true
+          '
 
       - name: Assert processed output exists
         run: |

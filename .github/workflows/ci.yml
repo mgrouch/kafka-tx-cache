@@ -53,6 +53,33 @@ jobs:
       - name: Wait for processing
         run: sleep 20
 
+      - name: Debug app logs
+        run: docker compose logs app
+
+      - name: Debug topic contents
+        run: |
+          docker compose exec -T kafka sh -lc '
+            echo "INPUT:"
+            /opt/kafka/bin/kafka-console-consumer.sh \
+              --bootstrap-server kafka:9092 \
+              --topic input-event \
+              --from-beginning \
+              --timeout-ms 5000 2>/dev/null || true
+          
+            echo "PROCESSED:"
+            /opt/kafka/bin/kafka-console-consumer.sh \
+              --bootstrap-server kafka:9092 \
+              --topic processed-event \
+              --from-beginning \
+              --timeout-ms 5000 2>/dev/null || true
+          
+            echo "CACHE:"
+            /opt/kafka/bin/kafka-console-consumer.sh \
+              --bootstrap-server kafka:9092 \
+              --topic cache-log-event \
+              --from-beginning \
+              --timeout-ms 5000 2>/dev/null || true
+
       - name: Assert processed output exists
         run: |
           docker compose exec -T kafka sh -lc '

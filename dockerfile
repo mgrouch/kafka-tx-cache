@@ -4,6 +4,7 @@ COPY pom.xml .
 COPY tx-cache-core tx-cache-core
 COPY tx-cache-app tx-cache-app
 RUN mvn -q -DskipTests clean package
+RUN find /workspace/*-cache*
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app

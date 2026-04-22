@@ -13,6 +13,8 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.ehcache.Cache;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.apache.kafka.common.utils.Utils;
+import java.nio.charset.StandardCharsets;
 
 import java.time.Duration;
 import java.time.Instant;

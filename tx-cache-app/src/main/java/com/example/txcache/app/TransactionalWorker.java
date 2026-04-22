@@ -144,13 +144,12 @@ public final class TransactionalWorker {
         }
 
         txTemplate.executeWithoutResult(status -> {
-
             for (CacheMutation<TEntity, SEntity, TSEntity> m : mutations) {
                 int targetPartition = partitionForKey(m.productId(), props.topicPartitions());
 
                 template.send(new ProducerRecord<>(
                         props.cacheLogTopic(),
-                        targetPartition, // explicit target partition
+                        targetPartition,
                         m.productId(),
                         codec.writeCacheLogRecord(CacheLogRecord.mutation(m))
                 ));
@@ -166,19 +165,20 @@ public final class TransactionalWorker {
                         e.getValue()
                 );
 
-                String key = "checkpoint-" + sourcePartition;
-
                 template.send(new ProducerRecord<>(
                         props.cacheLogTopic(),
-                        sourcePartition, // explicit target partition in cache-log-event
-                        key,
+                        sourcePartition,
+                        "checkpoint-" + sourcePartition,
                         codec.writeCacheLogRecord(CacheLogRecord.checkpoint(cp))
                 ));
             }
 
             for (ProcessedEvent<TEntity, SEntity, TSEntity> out : processed) {
+                int targetPartition = partitionForKey(out.entity().productId(), props.topicPartitions());
+
                 template.send(new ProducerRecord<>(
                         props.processedTopic(),
+                        targetPartition,
                         out.entity().productId(),
                         codec.writeProcessedEvent(out)
                 ));
@@ -191,6 +191,10 @@ public final class TransactionalWorker {
             applyMutationToCache(m);
         }
         restoredOffsets.putAll(nextOffsets);
+    }
+
+    private int partitionForKey(String key, int partitionCount) {
+        return Math.floorMod(key.hashCode(), partitionCount);
     }
 
     private void applyMutationToCache(CacheMutation<TEntity, SEntity, TSEntity> m) {
@@ -216,10 +220,6 @@ public final class TransactionalWorker {
             }
         }
         cache.put(m.productId(), state);
-    }
-
-    private int partitionForKey(String key, int partitionCount) {
-        return Math.floorMod(key.hashCode(), partitionCount);
     }
 
     private Map<String, Object> consumerProps() {

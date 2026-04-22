@@ -55,10 +55,26 @@ jobs:
 
       - name: Assert processed output exists
         run: |
-          docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic processed-event --from-beginning --timeout-ms 10000 > /tmp/out.txt || true"
-          docker compose exec -T kafka bash -lc "test $(wc -l < /tmp/out.txt) -ge 2"
+          docker compose exec -T kafka sh -lc '
+            /opt/kafka/bin/kafka-console-consumer.sh \
+              --bootstrap-server kafka:9092 \
+              --topic processed-event \
+              --from-beginning \
+              --timeout-ms 10000 \
+              > /tmp/out.txt 2>/dev/null || true
+          
+            test "$(wc -l < /tmp/out.txt)" -ge 2
+          '
 
       - name: Assert cache log exists
         run: |
-          docker compose exec -T kafka bash -lc "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic cache-log-event --from-beginning --timeout-ms 10000 > /tmp/cache.txt || true"
-          docker compose exec -T kafka bash -lc "test $(wc -l < /tmp/cache.txt) -ge 3"
+          docker compose exec -T kafka sh -lc '
+            /opt/kafka/bin/kafka-console-consumer.sh \
+              --bootstrap-server kafka:9092 \
+              --topic cache-log-event \
+              --from-beginning \
+              --timeout-ms 10000 \
+              > /tmp/cache.txt 2>/dev/null || true
+          
+            test "$(wc -l < /tmp/cache.txt)" -ge 3
+          '

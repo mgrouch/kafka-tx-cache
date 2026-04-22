@@ -42,3 +42,19 @@ This is static ownership.
 
 ```bash
 mvn clean package
+```
+
+## Run locally
+
+```bash
+java -jar tx-cache-app/target/tx-cache-app-1.0.0-SNAPSHOT.jar \
+--app.bootstrap-servers=localhost:9092 \
+--app.shard-index=0 \
+--app.shard-count=1
+```
+
+## Docker
+
+```bash
+docker compose up --build
+```

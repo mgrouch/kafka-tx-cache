@@ -194,7 +194,8 @@ public final class TransactionalWorker {
     }
 
     private int partitionForKey(String key, int partitionCount) {
-        return Math.floorMod(key.hashCode(), partitionCount);
+        byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return Utils.toPositive(Utils.murmur2(keyBytes)) % partitionCount;
     }
 
     private void applyMutationToCache(CacheMutation<TEntity, SEntity, TSEntity> m) {

@@ -116,6 +116,15 @@ public final class TransactionalWorker {
             InputEvent<TEntity, SEntity, TSEntity> input = codec.readInputEvent(rec.value());
             String productId = input.entity().productId();
 
+            int expectedPartition = partitionForKey(productId, props.topicPartitions());
+            if (expectedPartition != rec.partition()) {
+                throw new IllegalStateException(
+                        "Input record partition mismatch for productId=" + productId
+                                + ", expected=" + expectedPartition
+                                + ", actual=" + rec.partition()
+                );
+            }
+
             ProductState<TEntity, SEntity, TSEntity> current =
                     staged.computeIfAbsent(productId, k -> {
                         ProductState<TEntity, SEntity, TSEntity> existing = cache.get(k);
@@ -135,19 +144,33 @@ public final class TransactionalWorker {
         }
 
         txTemplate.executeWithoutResult(status -> {
+
             for (CacheMutation<TEntity, SEntity, TSEntity> m : mutations) {
+                int targetPartition = partitionForKey(m.productId(), props.topicPartitions());
+
                 template.send(new ProducerRecord<>(
                         props.cacheLogTopic(),
+                        targetPartition, // explicit target partition
                         m.productId(),
                         codec.writeCacheLogRecord(CacheLogRecord.mutation(m))
                 ));
             }
 
             for (Map.Entry<TopicPartition, Long> e : nextOffsets.entrySet()) {
-                OffsetCheckpoint cp = new OffsetCheckpoint(e.getKey().topic(), e.getKey().partition(), e.getValue());
-                String key = "checkpoint-" + e.getKey().partition();
+                TopicPartition sourceTp = e.getKey();
+                int sourcePartition = sourceTp.partition();
+
+                OffsetCheckpoint cp = new OffsetCheckpoint(
+                        sourceTp.topic(),
+                        sourcePartition,
+                        e.getValue()
+                );
+
+                String key = "checkpoint-" + sourcePartition;
+
                 template.send(new ProducerRecord<>(
                         props.cacheLogTopic(),
+                        sourcePartition, // explicit target partition in cache-log-event
                         key,
                         codec.writeCacheLogRecord(CacheLogRecord.checkpoint(cp))
                 ));
@@ -193,6 +216,10 @@ public final class TransactionalWorker {
             }
         }
         cache.put(m.productId(), state);
+    }
+
+    private int partitionForKey(String key, int partitionCount) {
+        return Math.floorMod(key.hashCode(), partitionCount);
     }
 
     private Map<String, Object> consumerProps() {

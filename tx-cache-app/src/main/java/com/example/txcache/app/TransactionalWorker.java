@@ -3,22 +3,35 @@ package com.example.txcache.app;
 import com.example.txcache.app.domain.SEntity;
 import com.example.txcache.app.domain.TEntity;
 import com.example.txcache.app.domain.TSEntity;
-import com.example.txcache.core.*;
+import com.example.txcache.core.BatchProcessor;
+import com.example.txcache.core.CacheLogRecord;
+import com.example.txcache.core.CacheMutation;
+import com.example.txcache.core.DomainCodec;
+import com.example.txcache.core.InputEvent;
+import com.example.txcache.core.OffsetCheckpoint;
+import com.example.txcache.core.ProcessResult;
+import com.example.txcache.core.ProcessedEvent;
+import com.example.txcache.core.ProductState;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.utils.Utils;
 import org.ehcache.Cache;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.apache.kafka.common.utils.Utils;
-import java.nio.charset.StandardCharsets;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 public final class TransactionalWorker {
 
@@ -51,15 +64,24 @@ public final class TransactionalWorker {
         TopicAdmin.ensureTopics(props);
 
         List<TopicPartition> inputOwned = PartitionOwnership.owned(
-                props.inputTopic(), props.topicPartitions(), props.shardIndex(), props.shardCount());
+                props.inputTopic(),
+                props.topicPartitions(),
+                props.shardIndex(),
+                props.shardCount()
+        );
 
         List<TopicPartition> cacheOwned = PartitionOwnership.owned(
-                props.cacheLogTopic(), props.topicPartitions(), props.shardIndex(), props.shardCount());
+                props.cacheLogTopic(),
+                props.topicPartitions(),
+                props.shardIndex(),
+                props.shardCount()
+        );
 
         restoreOwnedCache(cacheOwned);
 
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(consumerProps())) {
             consumer.assign(inputOwned);
+
             for (TopicPartition tp : inputOwned) {
                 Long restored = restoredOffsets.get(tp);
                 if (restored != null) {
@@ -70,46 +92,63 @@ public final class TransactionalWorker {
             }
 
             BatchAccumulator accumulator = new BatchAccumulator(
-                    props.batchMaxRecords(), props.batchMaxWaitMs(), props.pollTimeoutMs());
+                    props.batchMaxRecords(),
+                    props.batchMaxWaitMs(),
+                    props.pollTimeoutMs()
+            );
 
             while (true) {
                 List<ConsumerRecord<String, String>> records = accumulator.drain(consumer);
                 if (!records.isEmpty()) {
-                    processBatch(records);
+                    processBatch(consumer, records);
                 }
             }
         }
     }
 
     private void restoreOwnedCache(List<TopicPartition> ownedCachePartitions) {
+        if (ownedCachePartitions.isEmpty()) {
+            return;
+        }
+
         try (KafkaConsumer<String, String> restoreConsumer = new KafkaConsumer<>(consumerProps())) {
             restoreConsumer.assign(ownedCachePartitions);
             restoreConsumer.seekToBeginning(ownedCachePartitions);
-            Map<TopicPartition, Long> end = restoreConsumer.endOffsets(ownedCachePartitions);
+
+            Map<TopicPartition, Long> endOffsets = restoreConsumer.endOffsets(ownedCachePartitions);
 
             boolean done = false;
             while (!done) {
                 var polled = restoreConsumer.poll(Duration.ofMillis(props.pollTimeoutMs()));
+
                 for (ConsumerRecord<String, String> rec : polled) {
                     CacheLogRecord<TEntity, SEntity, TSEntity> log = codec.readCacheLogRecord(rec.value());
+
                     if (log.isMutation()) {
                         applyMutationToCache(log.mutation());
                     } else if (log.isCheckpoint()) {
                         OffsetCheckpoint cp = log.checkpoint();
-                        restoredOffsets.put(new TopicPartition(cp.sourceTopic(), cp.sourcePartition()), cp.nextOffset());
+                        restoredOffsets.put(
+                                new TopicPartition(cp.sourceTopic(), cp.sourcePartition()),
+                                cp.nextOffset()
+                        );
                     }
                 }
+
                 done = true;
                 for (TopicPartition tp : ownedCachePartitions) {
-                    if (restoreConsumer.position(tp) < end.get(tp)) {
+                    if (restoreConsumer.position(tp) < endOffsets.get(tp)) {
                         done = false;
+                        break;
                     }
                 }
             }
         }
     }
 
-    private void processBatch(List<ConsumerRecord<String, String>> batch) {
+    private void processBatch(KafkaConsumer<String, String> consumer,
+                              List<ConsumerRecord<String, String>> batch) {
+
         Map<String, ProductState<TEntity, SEntity, TSEntity>> staged = new LinkedHashMap<>();
         List<ProcessedEvent<TEntity, SEntity, TSEntity>> processed = new ArrayList<>();
         List<CacheMutation<TEntity, SEntity, TSEntity>> mutations = new ArrayList<>();
@@ -133,7 +172,9 @@ public final class TransactionalWorker {
                         return existing == null ? new ProductState<>(k) : existing.copy();
                     });
 
-            ProcessResult<TEntity, SEntity, TSEntity> result = processor.process(current, List.of(input));
+            ProcessResult<TEntity, SEntity, TSEntity> result =
+                    processor.process(current, List.of(input));
+
             staged.put(productId, result.newState());
             processed.addAll(result.processedEvents());
             mutations.addAll(result.cacheMutations());
@@ -144,6 +185,8 @@ public final class TransactionalWorker {
             TopicPartition tp = new TopicPartition(rec.topic(), rec.partition());
             nextOffsets.merge(tp, rec.offset() + 1, Math::max);
         }
+
+        ConsumerGroupMetadata groupMetadata = consumer.groupMetadata();
 
         txTemplate.executeWithoutResult(status -> {
             for (CacheMutation<TEntity, SEntity, TSEntity> m : mutations) {
@@ -186,17 +229,24 @@ public final class TransactionalWorker {
                 ));
             }
 
+            Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
+            for (Map.Entry<TopicPartition, Long> e : nextOffsets.entrySet()) {
+                offsetsToCommit.put(e.getKey(), new OffsetAndMetadata(e.getValue()));
+            }
+
+            template.sendOffsetsToTransaction(offsetsToCommit, groupMetadata);
             template.flush();
         });
 
         for (CacheMutation<TEntity, SEntity, TSEntity> m : mutations) {
             applyMutationToCache(m);
         }
+
         restoredOffsets.putAll(nextOffsets);
     }
 
     private int partitionForKey(String key, int partitionCount) {
-        byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         return Utils.toPositive(Utils.murmur2(keyBytes)) % partitionCount;
     }
 
@@ -210,29 +260,42 @@ public final class TransactionalWorker {
 
         switch (m.kind()) {
             case T -> {
-                if (m.tombstone()) state.tById().remove(m.entityId());
-                else state.tById().put(m.entityId(), m.tValue());
+                if (m.tombstone()) {
+                    state.tById().remove(m.entityId());
+                } else {
+                    state.tById().put(m.entityId(), m.tValue());
+                }
             }
             case S -> {
-                if (m.tombstone()) state.sById().remove(m.entityId());
-                else state.sById().put(m.entityId(), m.sValue());
+                if (m.tombstone()) {
+                    state.sById().remove(m.entityId());
+                } else {
+                    state.sById().put(m.entityId(), m.sValue());
+                }
             }
             case TS -> {
-                if (m.tombstone()) state.tsById().remove(m.entityId());
-                else state.tsById().put(m.entityId(), m.tsValue());
+                if (m.tombstone()) {
+                    state.tsById().remove(m.entityId());
+                } else {
+                    state.tsById().put(m.entityId(), m.tsValue());
+                }
             }
         }
+
         cache.put(m.productId(), state);
     }
 
     private Map<String, Object> consumerProps() {
         Map<String, Object> p = new HashMap<>();
         p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, props.bootstrapServers());
+        p.put(ConsumerConfig.GROUP_ID_CONFIG, "tx-cache-worker-" + props.shardIndex());
+        p.put(ConsumerConfig.CLIENT_ID_CONFIG, "tx-cache-consumer-" + props.shardIndex());
         p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         p.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
         p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, String.valueOf(props.batchMaxRecords()));
         return p;
     }
 }
